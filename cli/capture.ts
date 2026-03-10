@@ -21,6 +21,7 @@ const DEFAULT_NAV_SETTLE_MS = 350;
 const SECURE_DIR_MODE = 0o700;
 const SECURE_FILE_MODE = 0o600;
 const CAPTURE_URL_PROTOCOLS = new Set(['http:', 'https:']);
+const PROMPT_ALIAS_RE = /^[A-Za-z0-9_-]+$/;
 
 type Destination = 'local' | 'cloud';
 type CaptureMode = 'snapshot' | 'recorder';
@@ -39,6 +40,11 @@ interface CliArgs {
   screenshot?: string;
   wait: NavigationWaitMode;
   noClose: boolean;
+  prompt?: string;
+  promptTagBindings: PromptTagBinding[];
+  promptPickAliases: string[];
+  activate: boolean;
+  noActivate: boolean;
   help: boolean;
 }
 
@@ -77,12 +83,25 @@ interface RecorderStartInfo {
   targetRefs: PickedTargetRef[];
 }
 
+interface PromptTagBinding {
+  alias: string;
+  selector: string;
+}
+
+interface PromptAliasTarget {
+  alias: string;
+  selector: string;
+  targetRef: PickedTargetRef;
+  source: 'tag' | 'pick';
+}
+
 function printUsage() {
   // Keep aligned with NON_EXTENSION_WORKFLOW Phase 2/CLI surface.
-  console.log(`glitch capture --url "<url>" [options]
+  console.log(`glitch capture [url] [options]
 
-Required:
-  --url <url>                  Page URL to capture
+URL:
+  <url>                        Positional page URL to capture
+  --url <url>                  Equivalent explicit URL flag
 
 Options:
   --mode <snapshot|recorder>   Capture mode (default: snapshot)
@@ -94,6 +113,11 @@ Options:
   --cloud                      Upload to cloud MCP server
   --local                      Save pack locally
   --out <dir>                  Local pack output directory
+  --prompt <text>              Attach a prompt/problem statement to the pack
+  --prompt-tag <alias>=<css>   Bind a prompt alias to a selector (repeatable)
+  --prompt-pick <alias>        Pick an element for a prompt alias (repeatable)
+  --activate                   Add uploaded pack to Active Issues (best-effort)
+  --no-activate                Skip Active Issues activation
   --wait <mode>                Navigation wait mode: domcontentloaded | load | networkidle (default: domcontentloaded)
   --no-close                   Keep browser open after success
   --help                       Show help`);
@@ -211,6 +235,42 @@ function printNextStepArtifact(packId: string): void {
   console.log('Ask your agent to load this resource and start analysis.');
 }
 
+function parsePromptTagBinding(value: string): PromptTagBinding {
+  const eqIndex = value.indexOf('=');
+  if (eqIndex <= 0 || eqIndex === value.length - 1) {
+    throw new Error(`Invalid --prompt-tag "${value}". Expected <alias>=<selector>.`);
+  }
+
+  const alias = value.slice(0, eqIndex).trim();
+  const selector = value.slice(eqIndex + 1).trim();
+  if (!PROMPT_ALIAS_RE.test(alias)) {
+    throw new Error(`Invalid prompt alias "${alias}". Use letters, numbers, "_" or "-".`);
+  }
+  if (!selector) {
+    throw new Error(`Invalid --prompt-tag "${value}". Selector cannot be empty.`);
+  }
+
+  return { alias, selector };
+}
+
+function parsePromptAlias(value: string, flag: '--prompt-pick' | '--prompt-tag'): string {
+  const alias = value.trim();
+  if (!PROMPT_ALIAS_RE.test(alias)) {
+    throw new Error(`Invalid alias for ${flag}: "${value}". Use letters, numbers, "_" or "-".`);
+  }
+  return alias;
+}
+
+function extractPromptTokens(promptText: string): string[] {
+  const tokens: string[] = [];
+  const regex = /@([a-zA-Z0-9_-]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(promptText)) !== null) {
+    tokens.push(match[1]);
+  }
+  return tokens;
+}
+
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     url: '',
@@ -222,6 +282,10 @@ function parseArgs(argv: string[]): CliArgs {
     local: false,
     wait: 'domcontentloaded',
     noClose: false,
+    promptTagBindings: [],
+    promptPickAliases: [],
+    activate: false,
+    noActivate: false,
     help: false,
   };
 
@@ -229,6 +293,8 @@ function parseArgs(argv: string[]): CliArgs {
   if (tokens[0] === 'capture') {
     tokens.shift();
   }
+
+  let urlSource: 'none' | 'positional' | 'flag' = 'none';
 
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i];
@@ -241,7 +307,11 @@ function parseArgs(argv: string[]): CliArgs {
     if (token === '--url') {
       const value = tokens[i + 1];
       if (!value) throw new Error('Missing value for --url');
+      if (urlSource !== 'none') {
+        throw new Error('Specify URL either as positional <url> or --url <url>, not both.');
+      }
       args.url = value;
+      urlSource = 'flag';
       i += 1;
       continue;
     }
@@ -296,6 +366,40 @@ function parseArgs(argv: string[]): CliArgs {
       continue;
     }
 
+    if (token === '--prompt') {
+      const value = tokens[i + 1];
+      if (!value) throw new Error('Missing value for --prompt');
+      args.prompt = value;
+      i += 1;
+      continue;
+    }
+
+    if (token === '--prompt-tag') {
+      const value = tokens[i + 1];
+      if (!value) throw new Error('Missing value for --prompt-tag');
+      args.promptTagBindings.push(parsePromptTagBinding(value));
+      i += 1;
+      continue;
+    }
+
+    if (token === '--prompt-pick') {
+      const value = tokens[i + 1];
+      if (!value) throw new Error('Missing value for --prompt-pick');
+      args.promptPickAliases.push(parsePromptAlias(value, '--prompt-pick'));
+      i += 1;
+      continue;
+    }
+
+    if (token === '--activate') {
+      args.activate = true;
+      continue;
+    }
+
+    if (token === '--no-activate') {
+      args.noActivate = true;
+      continue;
+    }
+
     if (token === '--wait') {
       const value = tokens[i + 1];
       if (!value) throw new Error('Missing value for --wait');
@@ -319,11 +423,19 @@ function parseArgs(argv: string[]): CliArgs {
       continue;
     }
 
-    throw new Error(`Unknown argument: ${token}`);
+    if (token.startsWith('--')) {
+      throw new Error(`Unknown argument: ${token}`);
+    }
+
+    if (urlSource !== 'none') {
+      throw new Error(`Unexpected extra argument: ${token}`);
+    }
+    args.url = token;
+    urlSource = 'positional';
   }
 
   if (!args.help && !args.url) {
-    throw new Error('Missing required --url argument');
+    throw new Error('Missing required URL. Provide <url> or --url <url>.');
   }
 
   if (args.cloud && args.local) {
@@ -332,6 +444,37 @@ function parseArgs(argv: string[]): CliArgs {
 
   if (args.headless && args.selectors.length === 0) {
     throw new Error('--headless requires at least one --selector.');
+  }
+
+  if (args.activate && args.noActivate) {
+    throw new Error('Use either --activate or --no-activate, not both.');
+  }
+
+  const promptAliases = new Set<string>();
+  for (const binding of args.promptTagBindings) {
+    if (promptAliases.has(binding.alias)) {
+      throw new Error(`Duplicate prompt alias: @${binding.alias}`);
+    }
+    promptAliases.add(binding.alias);
+  }
+  for (const alias of args.promptPickAliases) {
+    if (promptAliases.has(alias)) {
+      throw new Error(`Duplicate prompt alias: @${alias}`);
+    }
+    promptAliases.add(alias);
+  }
+
+  const promptText = args.prompt?.trim() ?? '';
+  if (!promptText && promptAliases.size > 0) {
+    throw new Error('Prompt aliases require --prompt "<text>".');
+  }
+
+  if (promptText) {
+    const tokens = extractPromptTokens(promptText);
+    const missing = Array.from(new Set(tokens.filter((token) => !promptAliases.has(token))));
+    if (missing.length > 0) {
+      throw new Error(`Unknown prompt tags: ${missing.map((token) => `@${token}`).join(', ')}`);
+    }
   }
 
   if (!args.help) {
@@ -441,6 +584,30 @@ async function pickTargetRefs(
     throw new Error('No elements selected.');
   }
   return refs;
+}
+
+async function pickPromptTargetRef(
+  page: Awaited<ReturnType<Browser['newPage']>>,
+  alias: string
+): Promise<PickedTargetRef> {
+  console.log(`Prompt picker active for @${alias}. Click one element in the browser.`);
+  const refs = await page.evaluate(async () => {
+    const picker = (
+      window as typeof window & {
+        __glitchPicker?: {
+          start: (multi?: boolean, purpose?: 'watch' | 'prompt') => Promise<PickedTargetRef[]>;
+        };
+      }
+    ).__glitchPicker;
+    if (!picker) throw new Error('Glitch picker API not found after injector load.');
+    return await picker.start(false, 'prompt');
+  });
+
+  const picked = refs[0];
+  if (!picked) {
+    throw new Error(`No element selected for prompt alias @${alias}.`);
+  }
+  return picked;
 }
 
 async function synthesizeTargetRefsFromSelectors(
@@ -845,6 +1012,49 @@ async function uploadPack(
   }
 }
 
+function formatPromptAliasTargets(targets: PromptAliasTarget[]): string {
+  if (targets.length === 0) {
+    return '';
+  }
+
+  const rows = targets
+    .slice()
+    .sort((a, b) => a.alias.localeCompare(b.alias))
+    .map((entry) => {
+      const source = entry.source === 'pick' ? 'picked' : 'selector';
+      return `- @${entry.alias}: ${entry.selector} (${source}, ref=${entry.targetRef.refId})`;
+    });
+  return `\n\nPrompt tags:\n${rows.join('\n')}`;
+}
+
+async function activatePack(packId: string, cloudUrl: string, apiKey: string): Promise<void> {
+  const endpoint = new URL('/v1/active-issues', cloudUrl).toString();
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ packId, mode: 'promote' }),
+  });
+
+  if (response.ok) {
+    console.log(`Activated pack: ${packId}`);
+    return;
+  }
+
+  const body = await response.text();
+  const detail = body.trim();
+  if (response.status === 404 || response.status === 405) {
+    console.warn('Active Issues endpoint is unavailable on this server. Skipped --activate.');
+    return;
+  }
+
+  console.warn(
+    `Failed to activate pack (${response.status}): ${detail || response.statusText || 'request failed'}`
+  );
+}
+
 async function runCapture(args: CliArgs, config: CliConfig) {
   const destination = resolveDestination(args, config);
   if (destination === 'cloud' && !config.api_key) {
@@ -880,6 +1090,32 @@ async function runCapture(args: CliArgs, config: CliConfig) {
     }
 
     await page.evaluate(injectJs);
+
+    const promptAliasTargets: PromptAliasTarget[] = [];
+    if (args.promptTagBindings.length > 0) {
+      const selectors = args.promptTagBindings.map((binding) => binding.selector);
+      const refs = await synthesizeTargetRefsFromSelectors(page, selectors);
+      refs.forEach((ref, index) => {
+        const binding = args.promptTagBindings[index];
+        if (!binding) return;
+        promptAliasTargets.push({
+          alias: binding.alias,
+          selector: binding.selector,
+          targetRef: ref,
+          source: 'tag',
+        });
+      });
+    }
+
+    for (const alias of args.promptPickAliases) {
+      const picked = await pickPromptTargetRef(page, alias);
+      promptAliasTargets.push({
+        alias,
+        selector: picked.selector,
+        targetRef: picked,
+        source: 'pick',
+      });
+    }
 
     const targetRefs =
       args.selectors.length > 0
@@ -944,6 +1180,7 @@ async function runCapture(args: CliArgs, config: CliConfig) {
       source,
       bugType: args.bugType,
       url: page.url(),
+      prompt: `${args.prompt?.trim() ?? ''}${formatPromptAliasTargets(promptAliasTargets)}`.trim(),
     });
 
     if (destination === 'cloud') {
@@ -951,11 +1188,17 @@ async function runCapture(args: CliArgs, config: CliConfig) {
       const apiKey = config.api_key as string;
       await uploadPack(pack, cloudUrl, apiKey);
       console.log(`Uploaded pack: ${pack.id}`);
+      if (args.activate) {
+        await activatePack(pack.id, cloudUrl, apiKey);
+      }
       printNextStepArtifact(pack.id);
     } else {
       const outputRoot = args.out || config.local_pack_dir || DEFAULT_LOCAL_PACK_DIR;
       const packPath = writePackToDirectory(pack, outputRoot);
       console.log(`Saved pack: ${packPath}`);
+      if (args.activate) {
+        console.warn('Skipping --activate for local-only capture. Use --cloud with a personal API key.');
+      }
       printNextStepArtifact(pack.id);
     }
 

@@ -5,7 +5,7 @@ Command-line tool for capturing UI bugs, generating AI-ready context packs, and 
 **One command. No extension. No manual MCP setup.**
 
 ```bash
-glitch capture --url "https://example.com"
+glitch snapshot "https://example.com"
 ```
 
 Browser opens → you click elements → pack is saved → use `contextpacks://<packId>` in your AI agent.
@@ -19,7 +19,7 @@ Browser opens → you click elements → pack is saved → use `contextpacks://<
 npm install -g glitch-cli
 
 # Or run via npx
-npx glitch-cli capture --url "https://example.com"
+npx glitch-cli snapshot "https://example.com"
 ```
 
 **Requirements:** Node.js 18+, Chromium (installed automatically with Playwright on first run)
@@ -31,14 +31,14 @@ npx glitch-cli capture --url "https://example.com"
 1. **Capture a page** (interactive picker):
 
    ```bash
-   glitch capture --url "https://example.com"
+   glitch snapshot "https://example.com"
    ```
 
 2. **Save locally** (default) or **upload to cloud**:
 
    ```bash
-   glitch capture --url "https://example.com" --local
-   glitch capture --url "https://example.com" --cloud   # requires api_key in config
+   glitch snapshot "https://example.com" --local
+   glitch snapshot "https://example.com" --cloud   # requires api_key in config
    ```
 
 3. **Use the pack** — after capture, you'll get:
@@ -54,11 +54,31 @@ npx glitch-cli capture --url "https://example.com"
 
 | Command | Description |
 |--------|-------------|
+| `glitch snapshot <url>` | Capture snapshot shorthand |
+| `glitch record <url>` | Capture recorder shorthand |
 | `glitch capture` | Capture page elements (snapshot or recorder mode) |
+| `glitch packs list` | List cloud packs (`/v1/packs`) |
+| `glitch packs show <packRef>` | Show summary metadata for one pack |
+| `glitch packs pull <packRef>` | Alias for `glitch pull <packRef>` |
 | `glitch pull <packId>` | Download a cloud pack bundle and unpack locally |
+| `glitch prompt generate <packRef>` | Generate AI-ready prompt text |
+| `glitch prompt copy <packRef>` | Copy generated prompt text to clipboard |
+| `glitch workspace init [path]` | Initialize project config, register workspace, and set current (default) |
+| `glitch workspace add [path] --name <name>` | Register existing project root as workspace |
+| `glitch workspace list` | List saved workspaces |
+| `glitch workspace use <name\|path>` | Set current workspace |
+| `glitch workspace current` | Show current workspace |
+| `glitch login` | Authenticate via browser handoff and store API key |
+| `glitch logout` | Clear stored API key from config |
+| `glitch whoami` | Show current auth/account identity |
+| `glitch keys list` | List API keys for current user |
+| `glitch keys create [label]` | Create a new API key (plaintext shown once) |
+| `glitch keys revoke <keyId>` | Revoke an API key |
 | `glitch connect <target>` | Write MCP config for `cursor`, `claude`, or `windsurf` |
 | `glitch init` | Create `~/.glitch/config.json` with defaults |
 | `glitch config set <key> <value>` | Update a config value |
+| `glitch config get <key>` | Read a config value |
+| `glitch config list` | List effective config values |
 | `glitch doctor` | Run local/cloud diagnostics |
 | `glitch status` | Show cloud URL, auth, and usage |
 | `glitch help` | Show help |
@@ -68,10 +88,10 @@ npx glitch-cli capture --url "https://example.com"
 ## Capture Reference
 
 ```bash
-glitch capture --url "<url>" [options]
+glitch capture [url] [options]
 ```
 
-**Required:** `--url` — Page URL to capture
+**Required:** Provide a URL either as positional `<url>` or `--url <url>`
 
 **Options:**
 
@@ -85,6 +105,11 @@ glitch capture --url "<url>" [options]
 | `--cloud` | Upload to MCP server | — |
 | `--local` | Save to local directory | default |
 | `--out <dir>` | Local output directory | `~/.glitch/context-packs` |
+| `--prompt <text>` | Attach prompt/problem statement to pack | — |
+| `--prompt-tag <alias>=<css>` | Bind prompt alias to selector (repeatable) | — |
+| `--prompt-pick <alias>` | Pick a prompt alias target in browser (repeatable) | — |
+| `--activate` | Attempt to add uploaded pack to Active Issues | — |
+| `--no-activate` | Skip Active Issues activation | — |
 | `--screenshot <path>` | Save screenshot | — |
 | `--wait <mode>` | `domcontentloaded`, `load`, `networkidle` | `domcontentloaded` |
 | `--no-close` | Keep browser open after capture | — |
@@ -93,13 +118,13 @@ glitch capture --url "<url>" [options]
 
 ```bash
 # Snapshot with picker
-glitch capture --url "https://example.com"
+glitch snapshot "https://example.com"
 
 # Recorder, multi-element, save locally
-glitch capture --url "https://example.com" --mode recorder --multi --local
+glitch record "https://example.com" --multi --local
 
 # Headless with selectors
-glitch capture --url "https://example.com" --selector ".card" --selector "button" --headless --cloud
+glitch capture "https://example.com" --selector ".card" --selector "button" --headless --cloud
 ```
 
 ---
@@ -126,6 +151,38 @@ Config file: `~/.glitch/config.json`
 
 Initialize config: `glitch init`  
 Set a value: `glitch config set api_key glk_live_xxx`
+Get a value: `glitch config get cloud_url`  
+List all values: `glitch config list` or `glitch config list --json`
+
+---
+
+## Workspace
+
+Workspace registry file: `~/.glitch/workspaces.json`
+
+```bash
+# Initialize project config + register workspace + set current (default behavior)
+glitch workspace init ./my-app
+
+# Keep project config setup but skip workspace registry changes
+glitch workspace init ./my-app --no-register
+
+# Register workspace without switching current workspace
+glitch workspace init ./my-app --name my-app --no-use
+
+# Register existing root without rewriting .glitch/project.json
+glitch workspace add ./my-app --name my-app
+
+# List and inspect current workspace
+glitch workspace list
+glitch workspace list --json
+glitch workspace current
+glitch workspace current --json
+
+# Switch current workspace by name or path
+glitch workspace use my-app
+glitch workspace use ./my-app
+```
 
 ---
 
@@ -135,9 +192,58 @@ Download a cloud pack and unpack it locally:
 
 ```bash
 glitch pull <packId> [options]
+glitch packs pull <packId> [options]
 ```
 
 **Options:** `--mode slim|full`, `--format dir|bundle`, `--to <path>`
+
+---
+
+## Packs
+
+```bash
+glitch packs list [--json] [--host <hostname>] [--source <snapshot|recorder>] [--active]
+glitch packs show <packRef> [--mode slim|full] [--workspace <name|path>] [--json]
+glitch packs pull <packRef> [--workspace <name|path>] [options]
+```
+
+`<packRef>` supports:
+- cloud pack ID
+- local pulled directory pack path
+- local bundle JSON path
+
+---
+
+## Prompt
+
+```bash
+glitch prompt generate <packRef> [options]
+glitch prompt copy <packRef> [options]
+```
+
+`generate` options:
+- `--target <cursor|claude|copilot|chatgpt>`
+- `--framework <auto|react|vue|angular|svelte>`
+- `--style <concise|detailed>`
+- `--include-code` / `--no-code`
+- `--mode <slim|full>`
+- `--workspace <name|path>`
+- `--json` (generate only)
+
+---
+
+## Auth & Keys
+
+```bash
+glitch login
+glitch logout
+glitch whoami [--json]
+glitch keys list [--json]
+glitch keys create [label] [--json]
+glitch keys revoke <keyId> [--yes]
+```
+
+`glitch login` starts Firebase handoff auth in your browser and stores the resulting API key in `~/.glitch/config.json`.
 
 ---
 

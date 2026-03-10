@@ -2,6 +2,15 @@
   "name": "glitch-cli",
   "version": "0.1.0",
   "description": "Glitch CLI for capture, pull, and MCP connector workflows",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tryglitchapp/glitch.git",
+    "directory": "glitch-cli"
+  },
+  "homepage": "https://github.com/tryglitchapp/glitch",
+  "bugs": {
+    "url": "https://github.com/tryglitchapp/glitch/issues"
+  },
   "type": "module",
   "bin": {
     "glitch": "cli/dist/glitch.js"
