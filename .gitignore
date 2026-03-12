@@ -1,6 +1,8 @@
 node_modules/
 cli/dist/
 coverage/
+playwright-report/
+test-results/
 
 # Local packaging artifacts
 *.tgz
@@ -15,5 +17,19 @@ pnpm-debug.log*
 # OS files
 .DS_Store
 
+# Local editor and secret-bearing files
+.cursor/
+.env
+.env.*
+!.env.example
+!.env.sample
+.npmrc
+
+# Accidental local tool artifacts
+/esbuild
+/npm
+/glitch-cli@*
+
 # Local workspace/project state
 .glitch/
+context-packs/

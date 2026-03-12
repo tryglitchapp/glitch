@@ -61,6 +61,32 @@ describe('cli connect', () => {
     expect(fetchStub).toHaveBeenCalledTimes(2);
   });
 
+  it('fails when repo-scoped cursor config would write a real key and .cursor/ is not gitignored', async () => {
+    const tempRoot = await mkTempDir('glitch-connect-guardrail-');
+    const projectRoot = path.join(tempRoot, 'project');
+    const homeDir = path.join(tempRoot, 'home');
+    const configPath = path.join(projectRoot, '.cursor', 'mcp.json');
+
+    await fs.mkdir(path.join(projectRoot, '.git'), { recursive: true });
+
+    const fetchStub = createFetchOkStub();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitCode = await runConnectCommand(['cursor', '--project', projectRoot], {
+      cloudUrl: 'https://mcp.example.com',
+      apiKey: 'api_secret',
+      cwd: projectRoot,
+      homeDir,
+      fetchImpl: fetchStub as unknown as typeof fetch,
+    });
+
+    expect(exitCode).toBe(1);
+    await expect(fs.stat(configPath)).rejects.toBeTruthy();
+    expect(fetchStub).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]?.[0]).toContain('Refusing to write a real API key into .cursor/mcp.json');
+    expect(errorSpy.mock.calls[0]?.[0]).toContain('Re-run with --gitignore or use --template.');
+  });
+
   it('updates only the glitch MCP entry and preserves other servers', async () => {
     const tempRoot = await mkTempDir('glitch-connect-');
     const projectRoot = path.join(tempRoot, 'project');
@@ -118,15 +144,16 @@ describe('cli connect', () => {
     expect(fetchStub).toHaveBeenCalledTimes(2);
   });
 
-  it('writes template authorization and skips verification when --template is set', async () => {
+  it('writes template authorization without requiring .cursor/ gitignore protection', async () => {
     const tempRoot = await mkTempDir('glitch-connect-template-');
     const projectRoot = path.join(tempRoot, 'project');
     const homeDir = path.join(tempRoot, 'home');
     const configPath = path.join(projectRoot, '.cursor', 'mcp.json');
+    const gitignorePath = path.join(projectRoot, '.gitignore');
     await fs.mkdir(path.join(projectRoot, '.git'), { recursive: true });
 
     const fetchStub = vi.fn(async () => new Response('unexpected', { status: 500 }));
-    const exitCode = await runConnectCommand(['cursor', '--project', projectRoot, '--template', '--gitignore'], {
+    const exitCode = await runConnectCommand(['cursor', '--project', projectRoot, '--template'], {
       cloudUrl: 'https://mcp.example.com',
       apiKey: '',
       cwd: projectRoot,
@@ -145,6 +172,7 @@ describe('cli connect', () => {
         Authorization: 'Bearer [API KEY]',
       },
     });
+    await expect(fs.stat(gitignorePath)).rejects.toBeTruthy();
     expect(fetchStub).not.toHaveBeenCalled();
   });
 
@@ -185,9 +213,36 @@ describe('cli connect', () => {
     expect(exitCode).toBe(0);
     await expect(fs.stat(claudeConfigPath)).rejects.toBeTruthy();
     expect(fetchStub).toHaveBeenCalledTimes(2);
+    const loggedLines = logSpy.mock.calls.map((call) => String(call[0] ?? ''));
     expect(logSpy).toHaveBeenCalledWith(
       'Claude Desktop ignores remote MCP servers added directly in claude_desktop_config.json.'
     );
+    expect(loggedLines).toContain('Authorization: Bearer [REDACTED]');
+    expect(loggedLines).toContain('Re-run with --show-token to print the live bearer token for manual paste.');
+    expect(loggedLines.some((line) => line.includes('api_secret'))).toBe(false);
+  });
+
+  it('for claude remote mode prints the live token only when --show-token is passed', async () => {
+    const tempRoot = await mkTempDir('glitch-connect-claude-show-token-');
+    const projectRoot = path.join(tempRoot, 'project');
+    const homeDir = path.join(tempRoot, 'home');
+    await fs.mkdir(projectRoot, { recursive: true });
+
+    const fetchStub = createFetchOkStub();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const exitCode = await runConnectCommand(['claude', '--show-token'], {
+      cloudUrl: 'https://mcp.example.com',
+      apiKey: 'api_secret',
+      cwd: projectRoot,
+      homeDir,
+      fetchImpl: fetchStub as unknown as typeof fetch,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(fetchStub).toHaveBeenCalledTimes(2);
+    const loggedLines = logSpy.mock.calls.map((call) => String(call[0] ?? ''));
+    expect(loggedLines).toContain('Authorization: Bearer api_secret');
+    expect(loggedLines).not.toContain('Re-run with --show-token to print the live bearer token for manual paste.');
   });
 
   it('for claude stdio mode writes type-based stdio config entry', async () => {
@@ -219,6 +274,26 @@ describe('cli connect', () => {
       args: ['dist/stdio-proxy.js'],
     });
     expect(fetchStub).not.toHaveBeenCalled();
+  });
+
+  it('rejects --show-token for non-claude targets', async () => {
+    const tempRoot = await mkTempDir('glitch-connect-show-token-invalid-');
+    const projectRoot = path.join(tempRoot, 'project');
+    const homeDir = path.join(tempRoot, 'home');
+    const fetchStub = createFetchOkStub();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const exitCode = await runConnectCommand(['windsurf', '--show-token'], {
+      cloudUrl: 'https://mcp.example.com',
+      apiKey: 'api_secret',
+      cwd: projectRoot,
+      homeDir,
+      fetchImpl: fetchStub as unknown as typeof fetch,
+    });
+
+    expect(exitCode).toBe(1);
+    expect(fetchStub).not.toHaveBeenCalled();
+    expect(errorSpy.mock.calls[0]?.[0]).toContain('--claude-stdio-command/--claude-stdio-arg/--show-token are only supported for the claude target.');
   });
 
   it('fails when no API key is configured and --template is not used', async () => {

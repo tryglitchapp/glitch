@@ -186,7 +186,7 @@ describe('workspace phase 2 commands', () => {
 });
 
 describe('config phase 2 commands', () => {
-  it('config get/list expose values and defaults', async () => {
+  it('config get returns defaults for non-secret values', async () => {
     const { configPath } = await setupCliEnv();
     await fs.writeFile(
       configPath,
@@ -206,7 +206,60 @@ describe('config phase 2 commands', () => {
     const getExitCode = await runGlitchCli(['config', 'get', 'cloud_url']);
     expect(getExitCode).toBe(0);
     expect(logSpy).toHaveBeenCalledWith(DEFAULT_CLOUD_URL);
+  });
 
+  it('config get api_key redacts by default and includes configured metadata in json', async () => {
+    const { configPath } = await setupCliEnv();
+    await fs.writeFile(
+      configPath,
+      JSON.stringify(
+        {
+          api_key: 'api_live_test',
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    const { runGlitchCli } = await import('../../cli/glitch');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const textExitCode = await runGlitchCli(['config', 'get', 'api_key']);
+    expect(textExitCode).toBe(0);
+    expect(logSpy).toHaveBeenCalledWith('[REDACTED]');
+
+    logSpy.mockClear();
+    const jsonExitCode = await runGlitchCli(['config', 'get', 'api_key', '--json']);
+    expect(jsonExitCode).toBe(0);
+    const payload = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0] ?? '{}')) as {
+      key?: string;
+      value?: string;
+      configured?: boolean;
+    };
+    expect(payload).toEqual({
+      key: 'api_key',
+      value: '[REDACTED]',
+      configured: true,
+    });
+  });
+
+  it('config list redacts api_key by default', async () => {
+    const { configPath } = await setupCliEnv();
+    await fs.writeFile(
+      configPath,
+      JSON.stringify(
+        {
+          api_key: 'api_live_test',
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    const { runGlitchCli } = await import('../../cli/glitch');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     logSpy.mockClear();
     const listExitCode = await runGlitchCli(['config', 'list', '--json']);
     expect(listExitCode).toBe(0);
@@ -220,6 +273,36 @@ describe('config phase 2 commands', () => {
     expect(listed.default_destination).toBe('local');
     expect(listed.local_pack_dir).toBe('~/.glitch/context-packs');
     expect(listed.cloud_url).toBe(DEFAULT_CLOUD_URL);
+    expect(listed.api_key).toBe('[REDACTED]');
+  });
+
+  it('config get/list support --show-secret for explicit reveal', async () => {
+    const { configPath } = await setupCliEnv();
+    await fs.writeFile(
+      configPath,
+      JSON.stringify(
+        {
+          api_key: 'api_live_test',
+        },
+        null,
+        2
+      ),
+      'utf8'
+    );
+
+    const { runGlitchCli } = await import('../../cli/glitch');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const getExitCode = await runGlitchCli(['config', 'get', 'api_key', '--show-secret']);
+    expect(getExitCode).toBe(0);
+    expect(logSpy).toHaveBeenCalledWith('api_live_test');
+
+    logSpy.mockClear();
+    const listExitCode = await runGlitchCli(['config', 'list', '--show-secret', '--json']);
+    expect(listExitCode).toBe(0);
+    const listed = JSON.parse(String(logSpy.mock.calls.at(-1)?.[0] ?? '{}')) as {
+      api_key?: string;
+    };
     expect(listed.api_key).toBe('api_live_test');
   });
 });

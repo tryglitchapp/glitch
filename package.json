@@ -1,6 +1,6 @@
 {
-  "name": "glitch-cli",
-  "version": "0.1.0",
+  "name": "@glitch_package/glitch",
+  "version": "1.0.0",
   "description": "Glitch CLI for capture, pull, and MCP connector workflows",
   "repository": {
     "type": "git",
@@ -40,5 +40,8 @@
     "cli/dist/glitch.js",
     "cli/dist/capture-inject.js"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }

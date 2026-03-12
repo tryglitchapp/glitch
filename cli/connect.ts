@@ -11,6 +11,7 @@ type ConnectArgs = {
   global: boolean;
   template: boolean;
   gitignore: boolean;
+  showToken: boolean;
   claudeStdioCommand?: string;
   claudeStdioArgs: string[];
   help: boolean;
@@ -41,7 +42,7 @@ export async function runConnectCommand(args: string[], context: ConnectCommandC
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     console.error(
-      'Usage: glitch connect cursor|claude|windsurf [--project <path>] [--global] [--template] [--gitignore] [--claude-stdio-command <cmd> --claude-stdio-arg <arg>...]'
+      'Usage: glitch connect cursor|claude|windsurf [--project <path>] [--global] [--template] [--gitignore] [--show-token] [--claude-stdio-command <cmd> --claude-stdio-arg <arg>...]'
     );
     return 1;
   }
@@ -85,14 +86,13 @@ export async function runConnectCommand(args: string[], context: ConnectCommandC
 
   if (resolved.scope === 'project' && resolved.projectRoot) {
     try {
-      enforceCursorGitignoreGuardrail(resolved.projectRoot, parsed.gitignore);
+      enforceCursorGitignoreGuardrail(resolved.projectRoot, {
+        autoAdd: parsed.gitignore,
+        writingRealToken: !parsed.template,
+      });
     } catch (error) {
       console.error(error instanceof Error ? error.message : String(error));
       return 1;
-    }
-
-    if (!parsed.template && findNearestGitRoot(resolved.projectRoot)) {
-      console.warn('WARNING: Writing a real API key into a repo-scoped file. Keep `.cursor/` gitignored.');
     }
   }
 
@@ -127,7 +127,8 @@ Options:
   --project <path>         Project root for repo-scoped Cursor config
   --global                 Use a global config path (Cursor only)
   --template               Write "Bearer [API KEY]" instead of a real key
-  --gitignore              Add .cursor/ to project .gitignore for repo-scoped Cursor config
+  --gitignore              Add .cursor/ to the nearest repo .gitignore before writing a real key
+  --show-token             For claude remote setup: print the live bearer token
   --claude-stdio-command   For claude only: write local stdio command in claude_desktop_config.json
   --claude-stdio-arg       For claude only: append one stdio arg (repeatable)
   --help                   Show this message`);
@@ -139,6 +140,7 @@ function parseConnectArgs(argv: string[]): ConnectArgs {
     global: false,
     template: false,
     gitignore: false,
+    showToken: false,
     claudeStdioArgs: [],
     help: false,
   };
@@ -159,6 +161,10 @@ function parseConnectArgs(argv: string[]): ConnectArgs {
     }
     if (token === '--gitignore') {
       parsed.gitignore = true;
+      continue;
+    }
+    if (token === '--show-token') {
+      parsed.showToken = true;
       continue;
     }
     if (token === '--claude-stdio-command') {
@@ -191,8 +197,8 @@ function parseConnectArgs(argv: string[]): ConnectArgs {
     parsed.target = parseTarget(token);
   }
 
-  if (parsed.target !== 'claude' && (parsed.claudeStdioCommand || parsed.claudeStdioArgs.length > 0)) {
-    throw new Error('--claude-stdio-command/--claude-stdio-arg are only supported for the claude target.');
+  if (parsed.target && parsed.target !== 'claude' && (parsed.claudeStdioCommand || parsed.claudeStdioArgs.length > 0 || parsed.showToken)) {
+    throw new Error('--claude-stdio-command/--claude-stdio-arg/--show-token are only supported for the claude target.');
   }
   if (!parsed.claudeStdioCommand && parsed.claudeStdioArgs.length > 0) {
     throw new Error('--claude-stdio-arg requires --claude-stdio-command.');
@@ -271,7 +277,13 @@ function expandHomePath(input: string, home: string): string {
   return input;
 }
 
-function enforceCursorGitignoreGuardrail(projectRoot: string, autoAdd: boolean): void {
+function enforceCursorGitignoreGuardrail(
+  projectRoot: string,
+  options: {
+    autoAdd: boolean;
+    writingRealToken: boolean;
+  }
+): void {
   const guardrailRoot = findNearestGitRoot(projectRoot) ?? projectRoot;
   const gitignorePath = resolve(guardrailRoot, '.gitignore');
   const hasGitignore = existsSync(gitignorePath);
@@ -279,7 +291,7 @@ function enforceCursorGitignoreGuardrail(projectRoot: string, autoAdd: boolean):
   const ignored = isCursorIgnored(content);
   if (ignored) return;
 
-  if (autoAdd) {
+  if (options.autoAdd) {
     const prefix = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
     const next = `${content}${prefix}.cursor/\n`;
     writeFileWithMode(gitignorePath, next);
@@ -287,8 +299,12 @@ function enforceCursorGitignoreGuardrail(projectRoot: string, autoAdd: boolean):
     return;
   }
 
-  console.warn(
-    `WARNING: .cursor/ is not gitignored in ${gitignorePath}. Re-run with --gitignore to append ".cursor/".`
+  if (!options.writingRealToken) {
+    return;
+  }
+
+  throw new Error(
+    `Refusing to write a real API key into .cursor/mcp.json because .cursor/ is not gitignored in ${gitignorePath}. Re-run with --gitignore or use --template.`
   );
 }
 
@@ -485,7 +501,8 @@ async function runClaudeConnect(
   }
 
   const sseUrl = new URL('/sse', context.cloudUrl).toString();
-  const tokenValue = parsed.template ? '[API KEY]' : context.apiKey.trim() || '[API KEY]';
+  const apiKey = context.apiKey.trim();
+  const tokenValue = formatClaudeTokenForOutput(parsed, apiKey);
 
   console.log('Claude Desktop ignores remote MCP servers added directly in claude_desktop_config.json.');
   console.log('Use Claude Desktop -> Settings -> Connectors to add the remote Glitch server.');
@@ -497,17 +514,34 @@ async function runClaudeConnect(
     return 0;
   }
 
-  if (!context.apiKey.trim()) {
-    console.warn('No API key configured. Run `glitch config set api_key <key>` and re-run for a ready-to-paste bearer token.');
+  if (!apiKey) {
+    console.warn('No API key configured. Run `glitch config set api_key <key>` and re-run with --show-token for a ready-to-paste bearer token.');
     return 0;
   }
 
+  if (!parsed.showToken) {
+    console.log('Re-run with --show-token to print the live bearer token for manual paste.');
+  }
+
   try {
-    const verification = await verifyCloudAccess(context.cloudUrl, context.apiKey.trim(), context.fetchImpl ?? fetch);
+    const verification = await verifyCloudAccess(context.cloudUrl, apiKey, context.fetchImpl ?? fetch);
     console.log(`Cloud verification: PASS (health ${verification.healthStatus}, usage ${verification.usageStatus})`);
     return 0;
   } catch (error) {
     console.error(`Cloud verification failed: ${error instanceof Error ? error.message : String(error)}`);
     return 1;
   }
+}
+
+function formatClaudeTokenForOutput(parsed: ConnectArgs, apiKey: string): string {
+  if (parsed.template) {
+    return '[API KEY]';
+  }
+  if (!apiKey) {
+    return '[API KEY]';
+  }
+  if (parsed.showToken) {
+    return apiKey;
+  }
+  return '[REDACTED]';
 }

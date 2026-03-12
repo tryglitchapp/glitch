@@ -147,11 +147,13 @@ Config file: `~/.glitch/config.json`
 - `default_destination` — `local` or `cloud`
 - `local_pack_dir` — Directory for local packs
 - `cloud_url` — MCP server URL
-- `api_key` — API key for cloud uploads
+- `api_key` — API key for cloud uploads (`config get/list` redact it by default)
 
 Initialize config: `glitch init`  
 Set a value: `glitch config set api_key glk_live_xxx`
 Get a value: `glitch config get cloud_url`  
+Get the API key status: `glitch config get api_key`  
+Reveal the full API key intentionally: `glitch config get api_key --show-secret`  
 List all values: `glitch config list` or `glitch config list --json`
 
 ---
@@ -252,12 +254,15 @@ glitch keys revoke <keyId> [--yes]
 Generate MCP configuration for your editor:
 
 ```bash
-glitch connect cursor    # Writes to .cursor/mcp.json
-glitch connect claude    # Writes to Claude desktop config
-glitch connect windsurf  # Writes to Windsurf config
+glitch connect cursor --gitignore  # Adds .cursor/ to the repo .gitignore, then writes .cursor/mcp.json
+glitch connect cursor --template   # Writes a placeholder without a real key
+glitch connect claude              # Prints Claude connector instructions with redacted auth output
+glitch connect claude --show-token # Prints the live bearer token for manual paste
+glitch connect windsurf            # Writes to Windsurf config
 ```
 
-Requires `api_key` in config (or use `--template` to write a placeholder).
+Repo-scoped Cursor config refuses to write a real API key unless `.cursor/` is already gitignored or you pass `--gitignore`.
+Claude remote setup prints `Authorization: Bearer [REDACTED]` by default; use `--show-token` only when you intentionally need the live token in the terminal.
 
 ---
 

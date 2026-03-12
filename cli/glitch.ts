@@ -898,10 +898,10 @@ function runConfigSet(args: string[]): number {
 }
 
 function runConfigGet(args: string[]): number {
-  const { json, extras } = parseJsonFlag(args);
+  const { json, showSecret, extras } = parseConfigOutputFlags(args);
   const [rawKey] = extras;
   if (!rawKey || extras.length !== 1) {
-    console.error('Usage: glitch config get <key> [--json]');
+    console.error('Usage: glitch config get <key> [--json] [--show-secret]');
     return 1;
   }
 
@@ -919,19 +919,24 @@ function runConfigGet(args: string[]): number {
     return 1;
   }
 
-  const value = setMissingDefaults(existing).next[key] ?? '';
+  const rawValue = setMissingDefaults(existing).next[key] ?? '';
+  const formatted = formatConfigValueForOutput(key, rawValue, { showSecret });
   if (json) {
-    console.log(JSON.stringify({ key, value }, null, 2));
+    const payload: Record<string, unknown> = { key, value: formatted.value };
+    if (typeof formatted.configured === 'boolean') {
+      payload.configured = formatted.configured;
+    }
+    console.log(JSON.stringify(payload, null, 2));
   } else {
-    console.log(String(value));
+    console.log(formatted.value);
   }
   return 0;
 }
 
 function runConfigList(args: string[]): number {
-  const { json, extras } = parseJsonFlag(args);
+  const { json, showSecret, extras } = parseConfigOutputFlags(args);
   if (extras.length > 0) {
-    console.error('Usage: glitch config list [--json]');
+    console.error('Usage: glitch config list [--json] [--show-secret]');
     return 1;
   }
 
@@ -946,7 +951,7 @@ function runConfigList(args: string[]): number {
   const effective = setMissingDefaults(existing).next;
   const values = VALID_CONFIG_KEYS.reduce<Record<ConfigKey, string>>((acc, key) => {
     const raw = effective[key];
-    acc[key] = typeof raw === 'string' ? raw : '';
+    acc[key] = formatConfigValueForOutput(key, raw, { showSecret }).value;
     return acc;
   }, {
     default_destination: '',
@@ -970,8 +975,8 @@ function runConfig(args: string[]): number {
   if (!subcommand || subcommand === 'help' || subcommand === '--help' || subcommand === '-h') {
     console.log('Usage: glitch config <set|get|list> ...');
     console.log('  glitch config set <key> <value>');
-    console.log('  glitch config get <key> [--json]');
-    console.log('  glitch config list [--json]');
+    console.log('  glitch config get <key> [--json] [--show-secret]');
+    console.log('  glitch config list [--json] [--show-secret]');
     return subcommand ? 0 : 1;
   }
   if (subcommand === 'set') {
@@ -986,8 +991,8 @@ function runConfig(args: string[]): number {
 
   console.error('Usage: glitch config <set|get|list> ...');
   console.error('  glitch config set <key> <value>');
-  console.error('  glitch config get <key> [--json]');
-  console.error('  glitch config list [--json]');
+  console.error('  glitch config get <key> [--json] [--show-secret]');
+  console.error('  glitch config list [--json] [--show-secret]');
   return 1;
 }
 
@@ -1288,6 +1293,36 @@ function parseJsonFlag(args: string[]): { json: boolean; extras: string[] } {
   const json = args.includes('--json');
   const extras = args.filter((arg) => arg !== '--json');
   return { json, extras };
+}
+
+function parseConfigOutputFlags(args: string[]): { json: boolean; showSecret: boolean; extras: string[] } {
+  const json = args.includes('--json');
+  const showSecret = args.includes('--show-secret');
+  const extras = args.filter((arg) => arg !== '--json' && arg !== '--show-secret');
+  return { json, showSecret, extras };
+}
+
+function formatConfigValueForOutput(
+  key: ConfigKey,
+  rawValue: unknown,
+  options: {
+    showSecret: boolean;
+  }
+): { value: string; configured?: boolean } {
+  const value = typeof rawValue === 'string' ? rawValue : '';
+  if (key !== 'api_key') {
+    return { value };
+  }
+
+  const configured = value.trim().length > 0;
+  if (!configured || options.showSecret) {
+    return { value, configured };
+  }
+
+  return {
+    value: '[REDACTED]',
+    configured,
+  };
 }
 
 function parseWorkspaceFlag(args: string[]): { workspace?: string; extras: string[] } {
