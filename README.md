@@ -16,10 +16,10 @@ Browser opens → you click elements → pack is saved → use `contextpacks://<
 
 ```bash
 # Global install (recommended)
-npm install -g glitch-cli
+npm install -g @glitch_package/glitch
 
 # Or run via npx
-npx glitch-cli snapshot "https://example.com"
+npx @glitch_package/glitch snapshot "https://example.com"
 ```
 
 **Requirements:** Node.js 18+, Chromium (installed automatically with Playwright on first run)
@@ -269,8 +269,8 @@ Claude remote setup prints `Authorization: Bearer [REDACTED]` by default; use `-
 ## Build from Source
 
 ```bash
-git clone https://github.com/glitch-cli/glitch-cli.git
-cd glitch-cli
+git clone https://github.com/tryglitchapp/glitch.git
+cd glitch/glitch-cli
 npm install
 npx playwright install chromium   # Browser binary for capture
 npm run build

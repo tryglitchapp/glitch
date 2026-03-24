@@ -13,6 +13,12 @@ import {
   validateUploadRequestPayload,
 } from '../src/lib/context-pack/upload-schema';
 import { redactUploadPayload } from '../src/lib/security/redact-pack';
+import {
+  activateUploadedPack,
+  decidePostUploadActivation,
+  resolveCaptureActivationPreference,
+} from './active-issues';
+import { confirmYesNo, isInteractiveSession, type ConfirmFn } from './confirm';
 
 const DEFAULT_CONFIG_PATH = process.env.GLITCH_CONFIG_PATH?.trim() || '~/.glitch/config.json';
 const DEFAULT_LOCAL_PACK_DIR = '~/.glitch/context-packs';
@@ -94,6 +100,12 @@ interface PromptAliasTarget {
   targetRef: PickedTargetRef;
   source: 'tag' | 'pick';
 }
+
+type CaptureRuntimeContext = {
+  fetchImpl?: typeof fetch;
+  confirmImpl?: ConfirmFn;
+  interactive?: boolean;
+};
 
 function printUsage() {
   // Keep aligned with NON_EXTENSION_WORKFLOW Phase 2/CLI surface.
@@ -228,8 +240,8 @@ function sanitizeUrlForLogs(value: string): string {
   }
 }
 
-function printNextStepArtifact(packId: string): void {
-  const resourceUri = `contextpacks://${packId}`;
+function printNextStepArtifact(packId: string, useActiveAlias = false): void {
+  const resourceUri = useActiveAlias ? 'contextpacks://active' : `contextpacks://${packId}`;
   console.log(`Resource URI: ${resourceUri}`);
   console.log('Next step: paste this URI into Cursor/Claude with the Glitch MCP server enabled.');
   console.log('Ask your agent to load this resource and start analysis.');
@@ -271,7 +283,7 @@ function extractPromptTokens(promptText: string): string[] {
   return tokens;
 }
 
-function parseArgs(argv: string[]): CliArgs {
+export function parseCaptureArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     url: '',
     mode: 'snapshot',
@@ -883,8 +895,9 @@ function writePackToDirectory(
 async function uploadPack(
   pack: Awaited<ReturnType<typeof buildDirectoryPack>>,
   cloudUrl: string,
-  apiKey: string
-) {
+  apiKey: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ packId: string }> {
   const endpoint = new URL('/packs', cloudUrl).toString();
   const redactedPayload = redactUploadPayload({ pack });
   const validation = validateUploadRequestPayload(redactedPayload);
@@ -947,7 +960,7 @@ async function uploadPack(
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     let response: Response;
     try {
-      response = await fetch(endpoint, {
+      response = await fetchImpl(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -967,7 +980,19 @@ async function uploadPack(
     }
 
     if (response.ok) {
-      return;
+      let parsedBody: Record<string, unknown> | null = null;
+      try {
+        parsedBody = await response.json() as Record<string, unknown>;
+      } catch {
+        parsedBody = null;
+      }
+
+      const packId =
+        typeof parsedBody?.packId === 'string' && parsedBody.packId.trim().length > 0
+          ? parsedBody.packId.trim()
+          : pack.id;
+
+      return { packId };
     }
 
     const errorBody = await response.text();
@@ -1010,6 +1035,8 @@ async function uploadPack(
     const retryAfterMs = parseRetryAfterMs(response);
     await sleep(retryAfterMs ?? computeBackoffMs(attempt));
   }
+
+  return { packId: pack.id };
 }
 
 function formatPromptAliasTargets(targets: PromptAliasTarget[]): string {
@@ -1027,35 +1054,11 @@ function formatPromptAliasTargets(targets: PromptAliasTarget[]): string {
   return `\n\nPrompt tags:\n${rows.join('\n')}`;
 }
 
-async function activatePack(packId: string, cloudUrl: string, apiKey: string): Promise<void> {
-  const endpoint = new URL('/v1/active-issues', cloudUrl).toString();
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ packId, mode: 'promote' }),
-  });
-
-  if (response.ok) {
-    console.log(`Activated pack: ${packId}`);
-    return;
-  }
-
-  const body = await response.text();
-  const detail = body.trim();
-  if (response.status === 404 || response.status === 405) {
-    console.warn('Active Issues endpoint is unavailable on this server. Skipped --activate.');
-    return;
-  }
-
-  console.warn(
-    `Failed to activate pack (${response.status}): ${detail || response.statusText || 'request failed'}`
-  );
-}
-
-async function runCapture(args: CliArgs, config: CliConfig) {
+async function runCapture(
+  args: CliArgs,
+  config: CliConfig,
+  context: CaptureRuntimeContext = {},
+) {
   const destination = resolveDestination(args, config);
   if (destination === 'cloud' && !config.api_key) {
     throw new Error(
@@ -1185,20 +1188,55 @@ async function runCapture(args: CliArgs, config: CliConfig) {
 
     if (destination === 'cloud') {
       const cloudUrl = validateCloudUrl(config.cloud_url || DEFAULT_CLOUD_URL);
-      const apiKey = config.api_key as string;
-      await uploadPack(pack, cloudUrl, apiKey);
-      console.log(`Uploaded pack: ${pack.id}`);
-      if (args.activate) {
-        await activatePack(pack.id, cloudUrl, apiKey);
+      const apiKey = typeof config.api_key === 'string' ? config.api_key.trim() : '';
+      const uploadResult = await uploadPack(pack, cloudUrl, apiKey, context.fetchImpl ?? fetch);
+      console.log(`Uploaded pack: ${uploadResult.packId}`);
+
+      const activationDecision = await decidePostUploadActivation({
+        destination,
+        activationPreference: resolveCaptureActivationPreference(args),
+        hasApiKey: apiKey.length > 0,
+        interactive: context.interactive ?? isInteractiveSession(),
+        confirmImpl: context.confirmImpl ?? confirmYesNo,
+      });
+
+      if (activationDecision.note) {
+        console.warn(activationDecision.note);
       }
-      printNextStepArtifact(pack.id);
+
+      let useActiveAlias = false;
+      if (activationDecision.shouldActivate) {
+        const activationResult = await activateUploadedPack({
+          packId: uploadResult.packId,
+          cloudUrl,
+          apiKey,
+          fetchImpl: context.fetchImpl ?? fetch,
+        });
+        if (activationResult.activated) {
+          console.log('Added to Active Issues');
+          useActiveAlias = true;
+        } else if (activationResult.message) {
+          console.warn(activationResult.message);
+        }
+      }
+
+      printNextStepArtifact(uploadResult.packId, useActiveAlias);
     } else {
       const outputRoot = args.out || config.local_pack_dir || DEFAULT_LOCAL_PACK_DIR;
       const packPath = writePackToDirectory(pack, outputRoot);
       console.log(`Saved pack: ${packPath}`);
-      if (args.activate) {
-        console.warn('Skipping --activate for local-only capture. Use --cloud with a personal API key.');
+
+      const activationDecision = await decidePostUploadActivation({
+        destination,
+        activationPreference: resolveCaptureActivationPreference(args),
+        hasApiKey: typeof config.api_key === 'string' && config.api_key.trim().length > 0,
+        interactive: context.interactive ?? isInteractiveSession(),
+        confirmImpl: context.confirmImpl ?? confirmYesNo,
+      });
+      if (activationDecision.note) {
+        console.warn(activationDecision.note);
       }
+
       printNextStepArtifact(pack.id);
     }
 
@@ -1218,10 +1256,13 @@ async function runCapture(args: CliArgs, config: CliConfig) {
   }
 }
 
-export async function runCaptureCli(argv: string[] = process.argv.slice(2)): Promise<number> {
+export async function runCaptureCli(
+  argv: string[] = process.argv.slice(2),
+  context: CaptureRuntimeContext = {},
+): Promise<number> {
   let args: CliArgs;
   try {
-    args = parseArgs(argv);
+    args = parseCaptureArgs(argv);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     printUsage();
@@ -1242,7 +1283,7 @@ export async function runCaptureCli(argv: string[] = process.argv.slice(2)): Pro
   }
 
   try {
-    await runCapture(args, config);
+    await runCapture(args, config, context);
     return 0;
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));

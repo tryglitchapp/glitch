@@ -7,6 +7,13 @@ import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import process from 'node:process';
+import {
+  addActiveIssue as addActiveIssueRequest,
+  clearActiveIssues as clearActiveIssuesRequest,
+  listActiveIssues as listActiveIssuesRequest,
+  removeActiveIssue as removeActiveIssueRequest,
+  type ActiveIssueSummary,
+} from './active-issues';
 import { runCaptureCli } from './capture';
 import { runConnectCommand } from './connect';
 import { copyToClipboard } from './lib/clipboard';
@@ -2138,6 +2145,26 @@ type PacksShowOptions = {
   workspace?: string;
 };
 
+type ActiveListOptions = {
+  json: boolean;
+};
+
+type ActiveAddOptions = {
+  packId: string;
+  json: boolean;
+  keepOrder: boolean;
+};
+
+type ActiveRemoveOptions = {
+  packId: string;
+  json: boolean;
+};
+
+type ActiveClearOptions = {
+  json: boolean;
+  yes: boolean;
+};
+
 function parsePacksListArgs(args: string[]): PacksListOptions {
   const parsed: PacksListOptions = {
     json: false,
@@ -2267,31 +2294,13 @@ function parseListPacksPayload(payload: Record<string, unknown>): PacksListItem[
 }
 
 async function fetchActivePackIds(cloud: CloudRuntimeContext): Promise<Set<string>> {
-  const endpoint = new URL('/v1/active-issues', cloud.cloudUrl).toString();
-  const response = await fetch(endpoint, {
-    headers: {
-      Authorization: `Bearer ${cloud.apiKey}`,
-    },
+  const snapshot = await listActiveIssuesRequest({
+    cloudUrl: cloud.cloudUrl,
+    apiKey: cloud.apiKey,
   });
-  const bodyText = await response.text();
-  if (!response.ok) {
-    if (response.status === 404 || response.status === 405) {
-      throw new Error('packs list --active requires backend Active Issues support (Phase 5).');
-    }
-    throw new Error(`Active issues fetch failed (${response.status}): ${parseHttpErrorDetail(bodyText, response.statusText)}`);
-  }
-
-  const payload = parseJsonObject(bodyText, '/v1/active-issues');
-  const itemsRaw = payload.items;
-  if (!Array.isArray(itemsRaw)) {
-    throw new Error('Unexpected /v1/active-issues response: missing items array.');
-  }
-
   const ids = new Set<string>();
-  itemsRaw.forEach((itemEntry) => {
-    if (!itemEntry || typeof itemEntry !== 'object' || Array.isArray(itemEntry)) return;
-    const item = itemEntry as Record<string, unknown>;
-    if (typeof item.packId === 'string' && item.packId.trim()) {
+  snapshot.items.forEach((item) => {
+    if (item.packId.trim()) {
       ids.add(item.packId.trim());
     }
   });
@@ -2331,6 +2340,153 @@ function printPacksListTable(items: PacksListItem[]): void {
       `${row.id.padEnd(idWidth)}  ${row.timestamp.padEnd(timeWidth)}  ${row.host.padEnd(hostWidth)}  ${row.source.padEnd(sourceWidth)}  ${row.bugType.padEnd(bugWidth)}  ${row.watched.padStart(watchedWidth)}  ${row.changes.padStart(changesWidth)}  ${row.duration}`
     );
   });
+}
+
+function printActiveUsage() {
+  console.log(`glitch active <subcommand> [options]
+
+Subcommands:
+  list [--json]                       List current Active Issues newest-first
+  add <packId> [--json] [--keep-order]
+                                      Add or promote a pack in Active Issues
+  remove <packId> [--json]           Remove a pack from Active Issues
+  clear [--yes] [--json]             Remove all packs from Active Issues`);
+}
+
+function parseActiveListArgs(args: string[]): ActiveListOptions {
+  const parsed: ActiveListOptions = {
+    json: false,
+  };
+
+  args.forEach((token) => {
+    if (token === '--json') {
+      parsed.json = true;
+      return;
+    }
+    throw new Error(`Unknown argument for active list: ${token}`);
+  });
+
+  return parsed;
+}
+
+function parseActiveAddArgs(args: string[]): ActiveAddOptions {
+  const parsed: ActiveAddOptions = {
+    packId: '',
+    json: false,
+    keepOrder: false,
+  };
+
+  args.forEach((token) => {
+    if (token === '--json') {
+      parsed.json = true;
+      return;
+    }
+    if (token === '--keep-order') {
+      parsed.keepOrder = true;
+      return;
+    }
+    if (!parsed.packId) {
+      parsed.packId = token;
+      return;
+    }
+    throw new Error(`Unknown argument for active add: ${token}`);
+  });
+
+  if (!parsed.packId) {
+    throw new Error('Usage: glitch active add <packId> [--json] [--keep-order]');
+  }
+
+  return parsed;
+}
+
+function parseActiveRemoveArgs(args: string[]): ActiveRemoveOptions {
+  const parsed: ActiveRemoveOptions = {
+    packId: '',
+    json: false,
+  };
+
+  args.forEach((token) => {
+    if (token === '--json') {
+      parsed.json = true;
+      return;
+    }
+    if (!parsed.packId) {
+      parsed.packId = token;
+      return;
+    }
+    throw new Error(`Unknown argument for active remove: ${token}`);
+  });
+
+  if (!parsed.packId) {
+    throw new Error('Usage: glitch active remove <packId> [--json]');
+  }
+
+  return parsed;
+}
+
+function parseActiveClearArgs(args: string[]): ActiveClearOptions {
+  const parsed: ActiveClearOptions = {
+    json: false,
+    yes: false,
+  };
+
+  args.forEach((token) => {
+    if (token === '--json') {
+      parsed.json = true;
+      return;
+    }
+    if (token === '--yes') {
+      parsed.yes = true;
+      return;
+    }
+    throw new Error(`Unknown argument for active clear: ${token}`);
+  });
+
+  return parsed;
+}
+
+function printActiveIssuesTable(items: ActiveIssueSummary[], primaryPackId: string | null): void {
+  if (items.length === 0) {
+    console.log('No active issues found.');
+    return;
+  }
+
+  const rows = items.map((item) => ({
+    primary: item.isPrimary ? 'yes' : '',
+    packId: item.packId,
+    source: item.source ?? '-',
+    bugType: item.bugType ?? '-',
+    lastPromotedAt: item.lastPromotedAt ?? '-',
+    url: item.url ?? '-',
+  }));
+
+  const primaryWidth = Math.max('primary'.length, ...rows.map((row) => row.primary.length));
+  const packIdWidth = Math.max('packId'.length, ...rows.map((row) => row.packId.length));
+  const sourceWidth = Math.max('source'.length, ...rows.map((row) => row.source.length));
+  const bugTypeWidth = Math.max('bugType'.length, ...rows.map((row) => row.bugType.length));
+  const promotedWidth = Math.max('lastPromotedAt'.length, ...rows.map((row) => row.lastPromotedAt.length));
+
+  console.log(
+    `${'primary'.padEnd(primaryWidth)}  ${'packId'.padEnd(packIdWidth)}  ${'source'.padEnd(sourceWidth)}  ${'bugType'.padEnd(bugTypeWidth)}  ${'lastPromotedAt'.padEnd(promotedWidth)}  url`
+  );
+  rows.forEach((row) => {
+    console.log(
+      `${row.primary.padEnd(primaryWidth)}  ${row.packId.padEnd(packIdWidth)}  ${row.source.padEnd(sourceWidth)}  ${row.bugType.padEnd(bugTypeWidth)}  ${row.lastPromotedAt.padEnd(promotedWidth)}  ${row.url}`
+    );
+  });
+
+  if (primaryPackId) {
+    console.log(`Primary alias: contextpacks://active -> ${primaryPackId}`);
+  }
+}
+
+function formatActiveIssueCount(count: number): string {
+  return `${count} Active Issue${count === 1 ? '' : 's'}`;
+}
+
+function loadActiveCloudContext(): CloudRuntimeContext {
+  const config = loadConfig();
+  return resolveCloudRuntimeContext(config, true);
 }
 
 function serializePackSummary(pack: HydratedPack): Record<string, unknown> {
@@ -3417,6 +3573,186 @@ async function runKeys(args: string[]): Promise<number> {
   return 1;
 }
 
+async function runActiveList(args: string[]): Promise<number> {
+  let parsed: ActiveListOptions;
+  try {
+    parsed = parseActiveListArgs(args);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    console.error('Usage: glitch active list [--json]');
+    return 1;
+  }
+
+  try {
+    const cloud = loadActiveCloudContext();
+    const result = await listActiveIssuesRequest({
+      cloudUrl: cloud.cloudUrl,
+      apiKey: cloud.apiKey,
+    });
+
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      printActiveIssuesTable(result.items, result.primaryPackId);
+    }
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
+async function runActiveAdd(args: string[]): Promise<number> {
+  let parsed: ActiveAddOptions;
+  try {
+    parsed = parseActiveAddArgs(args);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    console.error('Usage: glitch active add <packId> [--json] [--keep-order]');
+    return 1;
+  }
+
+  try {
+    const cloud = loadActiveCloudContext();
+    const result = await addActiveIssueRequest({
+      packId: parsed.packId,
+      cloudUrl: cloud.cloudUrl,
+      apiKey: cloud.apiKey,
+      mode: parsed.keepOrder ? 'keep-order' : 'promote',
+    });
+
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return 0;
+    }
+
+    if (result.added) {
+      console.log(`Added "${result.packId}" to Active Issues.`);
+    } else if (result.promoted) {
+      console.log(`Promoted "${result.packId}" to the primary Active Issue.`);
+    } else {
+      console.log(`"${result.packId}" is already in Active Issues.`);
+    }
+
+    if (result.primaryPackId) {
+      console.log(`Primary active pack: ${result.primaryPackId}`);
+      console.log('Resource URI: contextpacks://active');
+    }
+    console.log(`Total: ${formatActiveIssueCount(result.total)}.`);
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
+async function runActiveRemove(args: string[]): Promise<number> {
+  let parsed: ActiveRemoveOptions;
+  try {
+    parsed = parseActiveRemoveArgs(args);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    console.error('Usage: glitch active remove <packId> [--json]');
+    return 1;
+  }
+
+  try {
+    const cloud = loadActiveCloudContext();
+    const result = await removeActiveIssueRequest({
+      packId: parsed.packId,
+      cloudUrl: cloud.cloudUrl,
+      apiKey: cloud.apiKey,
+    });
+
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return 0;
+    }
+
+    console.log(`Removed "${result.removedPackId}" from Active Issues.`);
+    if (result.primaryPackId) {
+      console.log(`Primary active pack: ${result.primaryPackId}`);
+      console.log('Resource URI: contextpacks://active');
+    } else {
+      console.log('No active issues remain.');
+    }
+    console.log(`Total: ${formatActiveIssueCount(result.total)}.`);
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
+async function runActiveClear(args: string[]): Promise<number> {
+  let parsed: ActiveClearOptions;
+  try {
+    parsed = parseActiveClearArgs(args);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    console.error('Usage: glitch active clear [--yes] [--json]');
+    return 1;
+  }
+
+  if (!parsed.yes) {
+    const confirmed = await confirmPrompt('Clear all Active Issues?');
+    if (!confirmed) {
+      console.error('Cancelled.');
+      return 1;
+    }
+  }
+
+  try {
+    const cloud = loadActiveCloudContext();
+    const result = await clearActiveIssuesRequest({
+      cloudUrl: cloud.cloudUrl,
+      apiKey: cloud.apiKey,
+    });
+
+    if (parsed.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return 0;
+    }
+
+    console.log(`Cleared ${formatActiveIssueCount(result.cleared)}.`);
+    console.log('No active issues remain.');
+    return 0;
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
+async function runActive(args: string[]): Promise<number> {
+  const [subcommand, ...rest] = args;
+  if (!subcommand) {
+    console.error('Usage: glitch active <list|add|remove|clear> ...');
+    return 1;
+  }
+
+  if (subcommand === 'help' || subcommand === '--help' || subcommand === '-h') {
+    printActiveUsage();
+    return 0;
+  }
+
+  if (subcommand === 'list') {
+    return await runActiveList(rest);
+  }
+  if (subcommand === 'add') {
+    return await runActiveAdd(rest);
+  }
+  if (subcommand === 'remove') {
+    return await runActiveRemove(rest);
+  }
+  if (subcommand === 'clear') {
+    return await runActiveClear(rest);
+  }
+
+  console.error(`Unknown active subcommand: ${subcommand}`);
+  printActiveUsage();
+  return 1;
+}
+
 async function runCaptureShortcut(
   commandName: 'snapshot' | 'record',
   mode: 'snapshot' | 'recorder',
@@ -3481,6 +3817,12 @@ const COMMAND_REGISTRY: CliCommand[] = [
     usage: 'packs <subcommand> [options]',
     summary: 'List/show/pull packs',
     run: async (args) => await runPacks(args),
+  },
+  {
+    name: 'active',
+    usage: 'active <subcommand> [options]',
+    summary: 'Manage Active Issues (list|add|remove|clear)',
+    run: async (args) => await runActive(args),
   },
   {
     name: 'prompt',
